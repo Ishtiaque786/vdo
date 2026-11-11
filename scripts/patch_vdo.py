@@ -180,10 +180,11 @@ def patch_quality(s: str) -> str:
     # The source method has an upstream gate that otherwise excludes 1440p.
     # Keep only the exact three allowed resolutions, and no higher-resolution gate.
     first = segment.index(anchor) + len(anchor)
-    segment2 = segment[:first] + ("\n                .filter(stream -> "
-        "stream.getResolution().equals(\"360p\") || "
-        "stream.getResolution().equals(\"1080p\") || "
-        "stream.getResolution().equals(\"1440p\"))\n                ")
+    segment2 = segment[:first] + (
+        "\n                .filter(stream -> stream.getResolution().equals(\"360p\")"
+        "\n                        || stream.getResolution().equals(\"1080p\")"
+        "\n                        || stream.getResolution().equals(\"1440p\"))\n                "
+    )
     return s[:start] + segment2 + s[stop:]
 edit(list_helper, patch_quality, 'restrict quality to 360p, 1080p, 1440p')
 
