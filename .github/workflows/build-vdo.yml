@@ -1,0 +1,64 @@
+
+name: Build VDO Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-vdo.yml'
+      - 'scripts/**'
+      - 'assets/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build installable VDO debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    steps:
+      - name: Get VDO build kit
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android tools
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Fetch pinned upstream NewPipe
+        run: git clone --branch v0.29.3 --depth 1 https://github.com/TeamNewPipe/NewPipe.git upstream
+
+      - name: Apply VDO branding and minimal navigation
+        run: python3 scripts/patch_vdo.py upstream
+
+      - name: Compile VDO Android APK
+        working-directory: upstream
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Verify signed debug APK exists
+        shell: bash
+        run: |
+          find upstream/app/build/outputs/apk -type f -name '*.apk' -print
+          test -s upstream/app/build/outputs/apk/debug/app-debug.apk
+          mkdir -p artifacts
+          cp upstream/app/build/outputs/apk/debug/app-debug.apk artifacts/VDO-debug.apk
+          sha256sum artifacts/VDO-debug.apk > artifacts/VDO-debug.apk.sha256
+
+      - name: Deliver VDO APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VDO-Android-APK
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
