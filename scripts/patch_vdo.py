@@ -27,44 +27,52 @@ def one_replace(source: str, old: str, new: str, label: str) -> str:
     if count != 1:
         raise RuntimeError(f'{label}: expected 1 anchor, got {count}')
     return source.replace(old, new, 1)
-# App label: update app_name even if upstream changes XML attribute order or quoting.
-strings = ROOT / 'res/values/strings.xml'
+# App label: force the launcher/app title to exactly "Vdo" in every locale.
+res_dir = ROOT / 'res'
 
-def set_app_name(source: str) -> str:
-    # Match a <string> whose name attribute is app_name, regardless of attribute
-    # order, quote style, or line breaks. Replace only its text content.
+def patch_app_name(source: str) -> str:
     pattern = re.compile(
         r'(?P<open><string\b(?=[^>]*\bname\s*=\s*["\']app_name["\'])[^>]*>)'
         r'.*?'
         r'(?P<close></string\s*>)',
         flags=re.DOTALL,
     )
-    matches = list(pattern.finditer(source))
-    if len(matches) > 1:
-        raise RuntimeError(f'Expected one app_name string resource, found {len(matches)}')
-    if matches:
-        match = matches[0]
-        return (source[:match.start()] + match.group('open') + 'VDO'
-                + match.group('close') + source[match.end():])
+    return pattern.sub(lambda m: m.group('open') + 'Vdo' + m.group('close'), source)
 
-    # Some upstream layouts may omit the resource. Add it to the base values file;
-    # Android's manifest can then continue to reference @string/app_name.
-    if '</resources>' not in source:
-        raise RuntimeError('Cannot add app_name: strings.xml has no closing </resources> tag')
-    return source.replace(
-        '</resources>',
-        '    <string name="app_name" translatable="false">VDO</string>\n</resources>',
-        1,
-    )
+app_name_files_changed = 0
+for values_dir in res_dir.iterdir():
+    if values_dir.is_dir() and values_dir.name.startswith('values'):
+        for resource_file in values_dir.glob('*.xml'):
+            original = resource_file.read_text(encoding='utf-8')
+            updated = patch_app_name(original)
+            if updated != original:
+                resource_file.write_text(updated, encoding='utf-8')
+                app_name_files_changed += 1
 
-edit(strings, set_app_name, 'VDO application name')
+base_strings = res_dir / 'values/strings.xml'
+base_text = base_strings.read_text(encoding='utf-8')
 if not re.search(
-    r'<string\b(?=[^>]*\bname=["\']app_name["\'])[^>]*>\s*VDO\s*</string>',
-    strings.read_text(encoding='utf-8'),
+    r'<string\b(?=[^>]*\bname\s*=\s*["\']app_name["\'])[^>]*>.*?</string>',
+    base_text,
     flags=re.DOTALL,
 ):
-    raise RuntimeError('VDO application name was not written to strings.xml')
+    if '</resources>' not in base_text:
+        raise RuntimeError('Cannot add Vdo app_name: strings.xml has no closing </resources> tag')
+    base_text = base_text.replace(
+        '</resources>',
+        '    <string name="app_name" translatable="false">Vdo</string>\n</resources>',
+        1,
+    )
+    base_strings.write_text(base_text, encoding='utf-8')
+    app_name_files_changed += 1
 
+if not re.search(
+    r'<string\b(?=[^>]*\bname\s*=\s*["\']app_name["\'])[^>]*>\s*Vdo\s*</string>',
+    base_strings.read_text(encoding='utf-8'),
+    flags=re.DOTALL,
+):
+    raise RuntimeError('Vdo app name was not written to the base strings.xml')
+print('VDO: app name set to Vdo in', app_name_files_changed, 'resource file(s)')
 
 # Separate install package, if upstream build file uses a literal application id.
 # Never change the Java namespace, resource namespace, or import statements.
@@ -94,47 +102,163 @@ copyfile(artwork, icon_dest)
 manifest = ROOT / 'AndroidManifest.xml'
 
 def patch_manifest(s: str) -> str:
-    s, n = re.subn(r'android:icon="[^"]+"', 'android:icon="@drawable/vdo_icon"', s, count=1)
+    s, n = re.subn(
+        r'android:icon="[^"]+"',
+        'android:icon="@drawable/vdo_icon"',
+        s,
+        count=1,
+    )
     if n != 1:
         raise RuntimeError('AndroidManifest has no application icon')
-    s = re.sub(r'android:roundIcon="[^"]+"', 'android:roundIcon="@drawable/vdo_icon"', s, count=1)
+
+    s, _ = re.subn(
+        r'android:roundIcon="[^"]+"',
+        'android:roundIcon="@drawable/vdo_icon"',
+        s,
+        count=1,
+    )
+
+    # Set the application label explicitly, so a manifest override cannot show
+    # "NewPipe HEAD" even if a build variant supplies a different label.
+    app_match = re.search(r'<application\b[^>]*>', s, flags=re.DOTALL)
+    if not app_match:
+        raise RuntimeError('AndroidManifest has no application element')
+    app_tag = app_match.group(0)
+    if re.search(r'\bandroid:label="[^"]+"', app_tag):
+        app_tag = re.sub(
+            r'\bandroid:label="[^"]+"',
+            'android:label="@string/app_name"',
+            app_tag,
+            count=1,
+        )
+    else:
+        app_tag = app_tag[:-1] + ' android:label="@string/app_name">'
+    s = s[:app_match.start()] + app_tag + s[app_match.end():]
+
+    # The launcher activity may override the application label; normalize it too.
+    activity_match = re.search(
+        r'<activity\b(?=[^>]*android:name="[^"]*MainActivity")[^>]*>',
+        s,
+        flags=re.DOTALL,
+    )
+    if activity_match:
+        activity_tag = activity_match.group(0)
+        if re.search(r'\bandroid:label="[^"]+"', activity_tag):
+            activity_tag = re.sub(
+                r'\bandroid:label="[^"]+"',
+                'android:label="@string/app_name"',
+                activity_tag,
+                count=1,
+            )
+        else:
+            activity_tag = activity_tag[:-1] + ' android:label="@string/app_name">'
+        s = s[:activity_match.start()] + activity_tag + s[activity_match.end():]
+
     return s
 edit(manifest, patch_manifest, 'custom app icon')
 
 
-# Replace NewPipe artwork used by the in-app navigation header and launch splash.
-# The drawer header title itself reads @string/app_name, which is already VDO.
-res_dir = ROOT / 'res'
+# Replace NewPipe artwork with the icon-only Vdo mark.
+# assets/vdo_icon.png is the play icon without the word VDO.
 branding_refs_changed = 0
 for resource_file in res_dir.rglob('*.xml'):
-    resource_text = resource_file.read_text(encoding='utf-8')
-    updated_text = resource_text.replace(
-        '@drawable/splash_foreground',
-        '@drawable/vdo_icon',
-    )
+    original = resource_file.read_text(encoding='utf-8')
+    updated = original.replace('@drawable/splash_foreground', '@drawable/vdo_icon')
     if resource_file.name == 'drawer_header.xml':
-        updated_text = updated_text.replace(
-            'tools:text="NewPipe"',
-            'tools:text="VDO"',
-        )
-    if updated_text != resource_text:
-        resource_file.write_text(updated_text, encoding='utf-8')
-        branding_refs_changed += resource_text.count('@drawable/splash_foreground')
+        updated = updated.replace('tools:text="NewPipe"', 'tools:text="Vdo"')
+        updated = updated.replace('tools:text="VDO"', 'tools:text="Vdo"')
+        updated = updated.replace('android:text="NewPipe HEAD"', 'android:text="@string/app_name"')
+        updated = updated.replace('android:text="NewPipe"', 'android:text="@string/app_name"')
+    if updated != original:
+        resource_file.write_text(updated, encoding='utf-8')
+        branding_refs_changed += original.count('@drawable/splash_foreground')
 
 drawer_header = res_dir / 'layout/drawer_header.xml'
 if not drawer_header.exists():
-    raise RuntimeError('Cannot find drawer_header.xml for VDO header branding')
+    raise RuntimeError('Cannot find drawer_header.xml for Vdo header branding')
 drawer_header_text = drawer_header.read_text(encoding='utf-8')
 if '@drawable/vdo_icon' not in drawer_header_text:
-    raise RuntimeError(
-        'VDO header icon was not applied: expected splash_foreground reference '
-        'in drawer_header.xml'
-    )
+    raise RuntimeError('Vdo header icon was not applied to drawer_header.xml')
 if 'android:text="@string/app_name"' not in drawer_header_text:
-    raise RuntimeError(
-        'Drawer header title is not linked to app_name; cannot guarantee VDO title'
-    )
+    raise RuntimeError('Drawer header title is not linked to the Vdo app_name')
 print('VDO: replaced NewPipe header/splash artwork references:', branding_refs_changed)
+
+# Use a soft lavender splash background on both legacy and Android 12+ splash APIs.
+branding_values = res_dir / 'values/vdo_branding.xml'
+branding_values.write_text(
+    '<?xml version="1.0" encoding="utf-8"?>\n'
+    '<resources>\n'
+    '    <color name="vdo_splash_background">#E9DDFB</color>\n'
+    '</resources>\n',
+    encoding='utf-8',
+)
+
+def set_style_item(style_body: str, item_name: str, item_value: str) -> str:
+    item_pattern = re.compile(
+        r'<item\s+name="' + re.escape(item_name) + r'"\s*>.*?</item>',
+        flags=re.DOTALL,
+    )
+    replacement = f'<item name="{item_name}">{item_value}</item>'
+    if item_pattern.search(style_body):
+        return item_pattern.sub(replacement, style_body, count=1)
+    return style_body.rstrip() + '\n        ' + replacement + '\n    '
+
+def patch_opening_theme(source: str) -> str:
+    style_pattern = re.compile(
+        r'(?P<open><style\b(?=[^>]*\bname\s*=\s*["\']OpeningTheme["\'])[^>]*>)'
+        r'(?P<body>.*?)'
+        r'(?P<close></style\s*>)',
+        flags=re.DOTALL,
+    )
+    matches = list(style_pattern.finditer(source))
+    if not matches:
+        return source
+
+    output = source
+    for match in reversed(matches):
+        body = match.group('body')
+        body = set_style_item(
+            body,
+            'android:windowBackground',
+            '@color/vdo_splash_background',
+        )
+        body = set_style_item(
+            body,
+            'android:windowSplashScreenBackground',
+            '@color/vdo_splash_background',
+        )
+        body = set_style_item(
+            body,
+            'android:windowSplashScreenAnimatedIcon',
+            '@drawable/vdo_icon',
+        )
+        replacement = match.group('open') + body + match.group('close')
+        output = output[:match.start()] + replacement + output[match.end():]
+    return output
+
+styles_files = [
+    p for p in res_dir.rglob('*.xml')
+    if p.parent.name.startswith('values') and p.name == 'styles.xml'
+]
+styles_changed = 0
+for styles_file in styles_files:
+    original = styles_file.read_text(encoding='utf-8')
+    updated = patch_opening_theme(original)
+    if updated != original:
+        styles_file.write_text(updated, encoding='utf-8')
+        styles_changed += 1
+
+if styles_changed == 0:
+    raise RuntimeError('Could not find an OpeningTheme style to apply the lavender splash')
+
+# Replace any remaining direct splash drawable references outside the theme.
+for resource_file in res_dir.rglob('*.xml'):
+    original = resource_file.read_text(encoding='utf-8')
+    updated = original.replace('@drawable/splash_background', '@color/vdo_splash_background')
+    if updated != original:
+        resource_file.write_text(updated, encoding='utf-8')
+
+print('VDO: lavender splash background applied to', styles_changed, 'theme file(s)')
 
 # Remove access to the navigation drawer (including edge swipes) on home.
 # The toolbar overflow is extended with only the few useful destinations.
