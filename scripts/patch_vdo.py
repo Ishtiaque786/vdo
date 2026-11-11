@@ -27,11 +27,44 @@ def one_replace(source: str, old: str, new: str, label: str) -> str:
     if count != 1:
         raise RuntimeError(f'{label}: expected 1 anchor, got {count}')
     return source.replace(old, new, 1)
-
-# App label: NewPipe marks app_name non-translatable; one change covers all languages.
+# App label: update app_name even if upstream changes XML attribute order or quoting.
 strings = ROOT / 'res/values/strings.xml'
-edit(strings, lambda s: re.sub(r'(<string\s+name="app_name"[^>]*>)[^<]*(</string>)', r'\g<1>VDO\2', s, count=1), 'VDO application name')
-assert 'name="app_name"' in strings.read_text() and '>VDO</string>' in strings.read_text()
+
+def set_app_name(source: str) -> str:
+    # Match a <string> whose name attribute is app_name, regardless of attribute
+    # order, quote style, or line breaks. Replace only its text content.
+    pattern = re.compile(
+        r'(?P<open><string\b(?=[^>]*\bname\s*=\s*["\']app_name["\'])[^>]*>)'
+        r'.*?'
+        r'(?P<close></string\s*>)',
+        flags=re.DOTALL,
+    )
+    matches = list(pattern.finditer(source))
+    if len(matches) > 1:
+        raise RuntimeError(f'Expected one app_name string resource, found {len(matches)}')
+    if matches:
+        match = matches[0]
+        return (source[:match.start()] + match.group('open') + 'VDO'
+                + match.group('close') + source[match.end():])
+
+    # Some upstream layouts may omit the resource. Add it to the base values file;
+    # Android's manifest can then continue to reference @string/app_name.
+    if '</resources>' not in source:
+        raise RuntimeError('Cannot add app_name: strings.xml has no closing </resources> tag')
+    return source.replace(
+        '</resources>',
+        '    <string name="app_name" translatable="false">VDO</string>\n</resources>',
+        1,
+    )
+
+edit(strings, set_app_name, 'VDO application name')
+if not re.search(
+    r'<string\b(?=[^>]*\bname=["\']app_name["\'])[^>]*>\s*VDO\s*</string>',
+    strings.read_text(encoding='utf-8'),
+    flags=re.DOTALL,
+):
+    raise RuntimeError('VDO application name was not written to strings.xml')
+
 
 # Separate install package, if upstream build file uses a literal application id.
 # Never change the Java namespace, resource namespace, or import statements.
