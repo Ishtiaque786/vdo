@@ -246,7 +246,6 @@ def restrict_resolution_settings(s: str) -> str:
     return s[:opening] + replacement + s[closing+1:]
 edit(list_helper, restrict_resolution_settings, 'default quality picker has three values')
 
-print('VDO patch complete. Source is a modified NewPipe GPL-3.0-or-later project.')
 
 
 # Compact video details screen:
@@ -270,11 +269,22 @@ def patch_video_detail(s: str) -> str:
         1,
     )
 
-    # Apply again after NewPipe populates a newly selected stream.
-    for call in ('handleResult(info);', 'handleResult(result);'):
-        if s.count(call) != 1:
-            raise RuntimeError(f'Expected one {call!r} call, found {s.count(call)}')
-        s = s.replace(call, call + '\n        applyVdoCompactVideoDetails();', 1)
+    # Apply after every NewPipe result callback. Some upstream versions call
+    # handleResult(info) from more than one path, so patch all matching lines.
+    result_callback = re.compile(
+        r'(?m)^([ \t]*)handleResult\((?:info|result)\);[ \t]*$'
+    )
+    s, callback_count = result_callback.subn(
+        lambda match: (
+            match.group(0) + '\n'
+            + match.group(1) + 'applyVdoCompactVideoDetails();'
+        ),
+        s,
+    )
+    if callback_count == 0:
+        raise RuntimeError(
+            'Cannot locate handleResult(info/result) callback in VideoDetailFragment'
+        )
 
     helper_marker = (
         '@Override // called from onViewCreated in '
@@ -337,3 +347,5 @@ def patch_video_detail(s: str) -> str:
     return s.replace(helper_marker, helper + helper_marker, 1)
 
 edit(video_detail, patch_video_detail, 'clean video screen; hide counts; actions under title arrow')
+
+print('VDO patch complete. Source is a modified NewPipe GPL-3.0-or-later project.')
