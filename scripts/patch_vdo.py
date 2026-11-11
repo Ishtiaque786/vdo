@@ -101,6 +101,41 @@ def patch_manifest(s: str) -> str:
     return s
 edit(manifest, patch_manifest, 'custom app icon')
 
+
+# Replace NewPipe artwork used by the in-app navigation header and launch splash.
+# The drawer header title itself reads @string/app_name, which is already VDO.
+res_dir = ROOT / 'res'
+branding_refs_changed = 0
+for resource_file in res_dir.rglob('*.xml'):
+    resource_text = resource_file.read_text(encoding='utf-8')
+    updated_text = resource_text.replace(
+        '@drawable/splash_foreground',
+        '@drawable/vdo_icon',
+    )
+    if resource_file.name == 'drawer_header.xml':
+        updated_text = updated_text.replace(
+            'tools:text="NewPipe"',
+            'tools:text="VDO"',
+        )
+    if updated_text != resource_text:
+        resource_file.write_text(updated_text, encoding='utf-8')
+        branding_refs_changed += resource_text.count('@drawable/splash_foreground')
+
+drawer_header = res_dir / 'layout/drawer_header.xml'
+if not drawer_header.exists():
+    raise RuntimeError('Cannot find drawer_header.xml for VDO header branding')
+drawer_header_text = drawer_header.read_text(encoding='utf-8')
+if '@drawable/vdo_icon' not in drawer_header_text:
+    raise RuntimeError(
+        'VDO header icon was not applied: expected splash_foreground reference '
+        'in drawer_header.xml'
+    )
+if 'android:text="@string/app_name"' not in drawer_header_text:
+    raise RuntimeError(
+        'Drawer header title is not linked to app_name; cannot guarantee VDO title'
+    )
+print('VDO: replaced NewPipe header/splash artwork references:', branding_refs_changed)
+
 # Remove access to the navigation drawer (including edge swipes) on home.
 # The toolbar overflow is extended with only the few useful destinations.
 activity = ROOT / 'java/org/schabi/newpipe/MainActivity.java'
@@ -212,3 +247,93 @@ def restrict_resolution_settings(s: str) -> str:
 edit(list_helper, restrict_resolution_settings, 'default quality picker has three values')
 
 print('VDO patch complete. Source is a modified NewPipe GPL-3.0-or-later project.')
+
+
+# Compact video details screen:
+# - keep only the channel name (hide its subscriber/sub-channel subtext)
+# - hide views and like/dislike counters/icons
+# - keep the existing title-arrow action panel, but collapsed by default
+video_detail = ROOT / 'java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java'
+
+def patch_video_detail(s: str) -> str:
+    if 'applyVdoCompactVideoDetails()' in s:
+        raise RuntimeError('VDO compact video details patch is already present')
+
+    init_anchor = 'super.initViews(rootView, savedInstanceState);'
+    if s.count(init_anchor) != 1:
+        raise RuntimeError(
+            f'Cannot locate unique VideoDetailFragment initViews anchor: {s.count(init_anchor)}'
+        )
+    s = s.replace(
+        init_anchor,
+        init_anchor + '\n        applyVdoCompactVideoDetails();',
+        1,
+    )
+
+    # Apply again after NewPipe populates a newly selected stream.
+    for call in ('handleResult(info);', 'handleResult(result);'):
+        if s.count(call) != 1:
+            raise RuntimeError(f'Expected one {call!r} call, found {s.count(call)}')
+        s = s.replace(call, call + '\n        applyVdoCompactVideoDetails();', 1)
+
+    helper_marker = (
+        '@Override // called from onViewCreated in '
+        '{@link BaseFragment#onViewCreated}'
+    )
+    if s.count(helper_marker) != 1:
+        raise RuntimeError('Cannot locate VideoDetailFragment helper insertion point')
+
+    helper = '''private void applyVdoCompactVideoDetails() {
+        // Keep the title and channel name visible; the title arrow opens the action panel.
+        binding.detailSecondaryControlPanel.setVisibility(View.GONE);
+        binding.detailVideoTitleView.setMaxLines(1);
+        binding.detailToggleSecondaryControlsView.setRotation(0f);
+
+        // Hide views, likes, dislikes and their icons.
+        hideVdoDetailView(R.id.detail_view_count_view);
+        hideVdoDetailView(R.id.detail_thumbs_up_img_view);
+        hideVdoDetailView(R.id.detail_thumbs_up_count_view);
+        hideVdoDetailView(R.id.detail_thumbs_down_img_view);
+        hideVdoDetailView(R.id.detail_thumbs_down_count_view);
+        hideVdoDetailView(R.id.detail_heart_image_view);
+        hideVdoDetailView(R.id.detail_thumbs_disabled_view);
+
+        // Hide the subscriber/sub-channel line, while preserving the channel name.
+        hideVdoDetailView(R.id.detail_sub_channel_text_view);
+        hideVdoUploaderSubtext(binding.detailUploaderRootLayout);
+    }
+
+    private void hideVdoDetailView(final int viewId) {
+        final View view = binding.getRoot().findViewById(viewId);
+        if (view != null) {
+            view.setVisibility(View.GONE);
+        }
+    }
+
+    private void hideVdoUploaderSubtext(final View parent) {
+        if (!(parent instanceof android.view.ViewGroup)) {
+            return;
+        }
+
+        final android.view.ViewGroup group = (android.view.ViewGroup) parent;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            final View child = group.getChildAt(i);
+
+            // Preserve the actual uploader/channel name.
+            if (child == binding.detailUploaderTextView) {
+                continue;
+            }
+
+            if (child instanceof android.widget.TextView) {
+                child.setVisibility(View.GONE);
+            } else if (child instanceof android.view.ViewGroup) {
+                hideVdoUploaderSubtext(child);
+            }
+        }
+    }
+
+    '''
+
+    return s.replace(helper_marker, helper + helper_marker, 1)
+
+edit(video_detail, patch_video_detail, 'clean video screen; hide counts; actions under title arrow')
